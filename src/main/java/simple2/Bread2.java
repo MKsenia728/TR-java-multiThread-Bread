@@ -2,14 +2,14 @@ package simple2;
 
 import lombok.Getter;
 import lombok.Setter;
-import lombok.Synchronized;
+
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+
 
 /*
  ******* Producer ********
@@ -20,11 +20,11 @@ import java.util.concurrent.TimeUnit;
  * перевозчику задается вместительность хлеба и скорость перевозки, а также * Producer * и * Seller *
  * если у * Producer * недостаточно хлеба, ждет (sleep)
  * работает два перевозчика (2 объекта, 2 потока)
- * !!!! не получилось !!!!! после доставки * Delivery * должен wait, пока у * Seller * не возникнет надобность в поставке, и он не разбудит notifyAll()
+ * после доставки * Delivery * должен wait, пока у * Seller * не возникнет надобность в поставке, и он не разбудит notifyAll()
  * ****** Seller **********
  * получает хлеб от * Delivery * (используя вспомогательный склад)
  * продает
- * !!!! не получилось !!!!! если количество на складе меньше заданного, вызывает перевозчиков notifyAll()
+ *  если количество на складе меньше заданного, вызывает перевозчиков notifyAll()
  * ****** Buyer *********
  * Стоит в очереди , покупает случайное количество (1-4) у * Seller *, ест, если хлеба недостаточно, уходит без хлеба
  * покупают 3 потока через ExecutorService
@@ -36,11 +36,13 @@ import java.util.concurrent.TimeUnit;
 public class Bread2 {
     public static void main(String[] args) {
         int timeWorking = 10000;
+        Dispatcher dispatcher = new Dispatcher();
 
         Producer producer = new Producer(100);
-        Seller seller = new Seller(10);
-        Delivery delivery1 = new Delivery(producer, seller, 3, 1000);
-        Delivery delivery2 = new Delivery(producer, seller, 5, 1500);
+        Seller seller = new Seller(dispatcher, 10);
+        Delivery delivery1 = new Delivery(producer, seller, dispatcher, 3, 500);
+        Delivery delivery2 = new Delivery(producer, seller, dispatcher, 5, 700);
+
 
         List<Thread> listThread = new ArrayList<>();
 
@@ -73,7 +75,7 @@ public class Bread2 {
         ExecutorService executorService = Executors.newFixedThreadPool(nThread);
         for (int n = 0; n < nThread; n++) {
             int finalN = n + 1;
-            executorService.submit(() -> Thread.currentThread().setName(threadName + String.valueOf(finalN)));
+            executorService.submit(() -> Thread.currentThread().setName(threadName + finalN));
         }
         long start = System.currentTimeMillis();
         while (System.currentTimeMillis() - start < timeWorking) {
@@ -82,6 +84,7 @@ public class Bread2 {
         executorService.shutdownNow();
     }
 }
+
 
 //Класс, который задает время работы программы, после все потоки прерываются
 class ThreadInterrupt extends Thread {
@@ -107,6 +110,7 @@ class ThreadInterrupt extends Thread {
 @Getter
 @Setter
 class Producer extends Thread implements Runnable {
+
     private int storageProducer;
     private int productionSpeed;
 
@@ -115,8 +119,7 @@ class Producer extends Thread implements Runnable {
         this.storageProducer = 10;
     }
 
-    @Override
-    public void run() {
+    private void produceBread() {
         while (!isInterrupted()) {
             storageProducer++;
             System.out.println("Producer has " + storageProducer + " bread on the storage --> thread : " + currentThread().getName());
@@ -128,44 +131,52 @@ class Producer extends Thread implements Runnable {
             }
         }
     }
+
+    @Override
+    public void run() {
+        produceBread();
+    }
 }
 
 //Класс, который перевозит хлеб, определенное количество
 class Delivery extends Thread implements Runnable {
     Producer producer;
     Seller seller;
-    private int capacity;
-    private int deliverySpeed;
+    Dispatcher dispatcher;
+    private final int capacity;
+    private final int deliverySpeed;
     int countOfDeliveries;
-//    public static final Object obj = new Object();
+    boolean isFree;
 
-    public Delivery(Producer producer, Seller seller, int capacity, int deliverySpeed) {
+
+    public Delivery(Producer producer, Seller seller, Dispatcher dispatcher, int capacity, int deliverySpeed) {
         this.capacity = capacity;
         this.deliverySpeed = deliverySpeed;
         this.producer = producer;
         this.seller = seller;
+        this.dispatcher = dispatcher;
         this.countOfDeliveries = 0;
+        this.isFree = true;
     }
 
-    @Override
-    synchronized public void run() {
-        System.out.println(currentThread().getState());
+    private void makeDelivery() {
         while (!isInterrupted()) {
             if (producer.getStorageProducer() >= capacity) {
                 producer.setStorageProducer(producer.getStorageProducer() - capacity);
                 countOfDeliveries++;
                 System.out.println("Delivery has " + capacity + " bread in the car, delivery #" + countOfDeliveries + " --> thread : " + currentThread().getName());
-//                synchronized (Delivery.class) {
                 try {
                     sleep(deliverySpeed);
-                    seller.setStorageSellerDelivery(seller.getStorageSellerDelivery() + capacity);
+                    seller.setStorageSeller(seller.getStorageSeller() + capacity);
                     System.out.println("Delivery got " + capacity + " bread to the Seller --> thread : " + currentThread().getName());
-//                        wait();
+                    if (!dispatcher.dispatchDelivery(false)) {
+                        System.out.println("Delivery was interrupted");
+                        return;
+                    }
                 } catch (InterruptedException e) {
                     System.out.println("Delivery was interrupted");
                     return;
                 }
-//                }
             } else {
                 try {
                     System.out.println("Delivery is waiting when producer make bread");
@@ -177,28 +188,31 @@ class Delivery extends Thread implements Runnable {
             }
         }
     }
+
+    @Override
+    synchronized public void run() {
+        makeDelivery();
+    }
 }
 
 @Getter
 @Setter
 class Seller extends Thread implements Runnable {
     volatile private int storageSeller;
-    volatile private int storageSellerDelivery;
     private int breakTime;
     private int minNumberInStorage;
+    Dispatcher dispatcher;
+    public static final Object obj = new Object();
 
-    public Seller(int minNumberInStorage) {
+    public Seller(Dispatcher dispatcher, int minNumberInStorage) {
         this.minNumberInStorage = minNumberInStorage;
         this.storageSeller = 10;
-        this.storageSellerDelivery = 0;
+        this.dispatcher = dispatcher;
         this.breakTime = 1000;
     }
 
-    @Override
-    public void run() {
+    private void makeSell() {
         while (!isInterrupted()) {
-            storageSeller += storageSellerDelivery;
-            storageSellerDelivery = 0;
             System.out.println("Seller has " + storageSeller + " bread on the storage --> thread : " + currentThread().getName());
             try {
                 sleep(breakTime / 5);
@@ -206,19 +220,22 @@ class Seller extends Thread implements Runnable {
                 System.out.println("Seller was interrupted1");
                 return;
             }
-            synchronized (Seller.class) {
-                if (storageSeller < minNumberInStorage) {
-                    try {
-//                        notifyAll();
-                        System.out.println("Seller is waiting Delivery, count of bread is " + storageSeller);
-                        sleep(breakTime);
-                    } catch (InterruptedException e) {
-                        System.out.println("Seller was interrupted2");
-                        return;
-                    }
+            if (storageSeller < minNumberInStorage) {
+                dispatcher.dispatchDelivery(true);
+                try {
+                    System.out.println("Seller is waiting Delivery, count of bread is " + storageSeller);
+                    sleep(breakTime);
+                } catch (InterruptedException e) {
+                    System.out.println("Seller was interrupted2");
+                    return;
                 }
             }
         }
+    }
+
+    @Override
+    public void run() {
+        makeSell();
     }
 }
 
@@ -230,8 +247,7 @@ class Buyer extends Thread implements Runnable {
         this.seller = seller;
     }
 
-    @Override
-    public void run() {
+    private void makeBuy() {
         try {
             sleep(200);
             System.out.println("Buyer is waiting in line --> Thread : " + currentThread().getName());
@@ -261,6 +277,30 @@ class Buyer extends Thread implements Runnable {
                 }
             }
         }
+    }
+
+    @Override
+    public void run() {
+        makeBuy();
+    }
+}
+
+class Dispatcher {
+
+    synchronized public boolean dispatchDelivery(boolean needBread) {
+        if (needBread) {
+            notifyAll();
+        }
+        else {
+            try {
+                wait();
+            } catch (InterruptedException e) {
+                System.out.println("Delivery was interrupted in Dispatcher");
+                return false;
+
+            }
+        }
+        return true;
     }
 }
 
